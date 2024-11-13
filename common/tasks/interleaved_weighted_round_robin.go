@@ -237,12 +237,12 @@ func (s *InterleavedWeightedRoundRobinScheduler[T, K]) doCleanup() {
 	cleanupDelay := s.options.InactiveChannelDeletionDelay()
 	now := s.ts.Now()
 	for k, weightedChan := range s.weightedChannels {
-		if now.Sub(weightedChan.LastActiveTime()) > cleanupDelay &&
-			len(weightedChan.Chan()) == 0 &&
+		if len(weightedChan.Chan()) == 0 &&
 			weightedChan.RefCount() == 0 {
-
-			keysToDelete = append(keysToDelete, k)
-			continue
+			if now.Sub(weightedChan.LastActiveTime()) > cleanupDelay {
+				keysToDelete = append(keysToDelete, k)
+				continue
+			}
 		}
 	}
 
