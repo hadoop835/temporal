@@ -4108,9 +4108,8 @@ func (s *VersioningIntegSuite) TestDescribeTaskQueueEnhanced_Versioned_Reachabil
 	// --select-all-active
 	selectAllActive := &taskqueuepb.TaskQueueVersionSelection{AllActive: true}
 	s.getBuildIdReachability(ctx, tq, selectAllActive, map[string]enumspb.BuildIdTaskReachability{
-		"id1": enumspb.BUILD_ID_TASK_REACHABILITY_REACHABLE,   // unreachable because doesn't exist
-		"":    enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because no longer default
-		"id2": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because doesn't exist
+		"id1": enumspb.BUILD_ID_TASK_REACHABILITY_REACHABLE,   // active because recently queried and loaded (no pollers)
+		"id2": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // active because recently queried and loaded (no pollers)
 	})
 }
 
@@ -4817,6 +4816,11 @@ func (s *VersioningIntegSuite) getBuildIdReachability(
 		expected, ok := expectedReachability[buildId]
 		s.Assert().True(ok, "build id %s was not expected", buildId)
 		s.Assert().Equal(expected, vi.GetTaskReachability(), "build id %s has unexpected reachability", buildId)
+	}
+	for id, expected := range expectedReachability {
+		actualVersionsInfo, ok := resp.GetVersionsInfo()[id]
+		s.Assert().True(ok, "build id %s was expected and not received", id)
+		s.Assert().Equal(expected, actualVersionsInfo.GetTaskReachability(), "build id %s has unexpected reachability", id)
 	}
 }
 
