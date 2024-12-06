@@ -4071,7 +4071,50 @@ func (s *VersioningIntegSuite) TestDescribeTaskQueueEnhanced_Versioned_Reachabil
 	}, 5*time.Second, 50*time.Millisecond)
 }
 
-func (s *VersioningIntegSuite) TestDescribeTaskQueueEnhanced_Versioned_BasicReachability() {
+func (s *VersioningIntegSuite) TestDescribeTaskQueueEnhanced_Versioned_ReachabilityNoWorkflows() {
+	tq := testcore.RandomizeStr(s.T().Name())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s.getBuildIdReachability(ctx, tq, nil, map[string]enumspb.BuildIdTaskReachability{
+		"": enumspb.BUILD_ID_TASK_REACHABILITY_REACHABLE, // reachable because unversioned is default
+	})
+
+	s.addAssignmentRule(ctx, tq, "id1")
+
+	// no version selection
+	s.getBuildIdReachability(ctx, tq, nil, map[string]enumspb.BuildIdTaskReachability{
+		"id1": enumspb.BUILD_ID_TASK_REACHABILITY_REACHABLE, // reachable by default assignment rule
+	})
+
+	// --select-unversioned
+	selectUnversioned := &taskqueuepb.TaskQueueVersionSelection{Unversioned: true}
+	s.getBuildIdReachability(ctx, tq, selectUnversioned, map[string]enumspb.BuildIdTaskReachability{
+		"": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because no longer default
+	})
+
+	// --select-build-id ""
+	selectEmpty := &taskqueuepb.TaskQueueVersionSelection{BuildIds: []string{""}}
+	s.getBuildIdReachability(ctx, tq, selectEmpty, map[string]enumspb.BuildIdTaskReachability{
+		"": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because no longer default
+	})
+
+	// --select-build-id id2
+	selectId2 := &taskqueuepb.TaskQueueVersionSelection{BuildIds: []string{"id2"}}
+	s.getBuildIdReachability(ctx, tq, selectId2, map[string]enumspb.BuildIdTaskReachability{
+		"id2": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because doesn't exist
+	})
+
+	// --select-all-active
+	selectAllActive := &taskqueuepb.TaskQueueVersionSelection{AllActive: true}
+	s.getBuildIdReachability(ctx, tq, selectAllActive, map[string]enumspb.BuildIdTaskReachability{
+		"id1": enumspb.BUILD_ID_TASK_REACHABILITY_REACHABLE,   // unreachable because doesn't exist
+		"":    enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because no longer default
+		"id2": enumspb.BUILD_ID_TASK_REACHABILITY_UNREACHABLE, // unreachable because doesn't exist
+	})
+}
+
+func (s *VersioningIntegSuite) TestDescribeTaskQueueEnhanced_Versioned_ReachabilityBasic() {
 	tq := testcore.RandomizeStr(s.T().Name())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
