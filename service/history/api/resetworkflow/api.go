@@ -137,7 +137,18 @@ func Invoke(
 	}
 	baseCurrentBranchToken := baseCurrentVersionHistory.GetBranchToken()
 	baseNextEventID := baseMutableState.GetNextEventID()
+	baseWorkflow := ndc.NewWorkflow(
+		shard.GetClusterMetadata(),
+		baseWorkflowLease.GetContext(),
+		baseWorkflowLease.GetMutableState(),
+		baseWorkflowLease.GetReleaseFn(),
+	)
 
+	namespaceEntry, err := api.GetActiveNamespace(shard, namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	allowResetWithPendingChildren := shard.GetConfig().AllowResetWithPendingChildren(namespaceEntry.Name().String())
 	if err := ndc.NewWorkflowResetter(
 		shard,
 		workflowConsistencyChecker.GetWorkflowCache(),
@@ -153,6 +164,7 @@ func Invoke(
 		baseNextEventID,
 		resetRunID,
 		request.GetRequestId(),
+		baseWorkflow,
 		ndc.NewWorkflow(
 			shard.GetClusterMetadata(),
 			currentWorkflowLease.GetContext(),
@@ -162,6 +174,7 @@ func Invoke(
 		request.GetReason(),
 		nil,
 		GetResetReapplyExcludeTypes(request.GetResetReapplyExcludeTypes(), request.GetResetReapplyType()),
+		allowResetWithPendingChildren,
 	); err != nil {
 		return nil, err
 	}

@@ -26,6 +26,7 @@ package worker
 
 import (
 	"context"
+	"os"
 
 	"go.temporal.io/server/api/adminservice/v1"
 	"go.temporal.io/server/client"
@@ -48,6 +49,7 @@ import (
 	"go.temporal.io/server/service/worker/batcher"
 	workercommon "go.temporal.io/server/service/worker/common"
 	"go.temporal.io/server/service/worker/deletenamespace"
+	"go.temporal.io/server/service/worker/deployment"
 	"go.temporal.io/server/service/worker/dlq"
 	"go.temporal.io/server/service/worker/migration"
 	"go.temporal.io/server/service/worker/scheduler"
@@ -61,6 +63,7 @@ var Module = fx.Options(
 	deletenamespace.Module,
 	scheduler.Module,
 	batcher.Module,
+	deployment.Module,
 	dlq.Module,
 	dynamicconfig.Module,
 	fx.Provide(
@@ -85,6 +88,7 @@ var Module = fx.Options(
 			})
 		},
 	),
+	fx.Provide(HostInfoProvider),
 	fx.Provide(VisibilityManagerProvider),
 	fx.Provide(ThrottledLoggerRpsFnProvider),
 	fx.Provide(ConfigProvider),
@@ -131,6 +135,11 @@ func PersistenceRateLimitingParamsProvider(
 	)
 }
 
+func HostInfoProvider() (membership.HostInfo, error) {
+	hn, err := os.Hostname()
+	return membership.NewHostInfoFromAddress(hn), err
+}
+
 func ServiceResolverProvider(
 	membershipMonitor membership.Monitor,
 ) (membership.ServiceResolver, error) {
@@ -169,6 +178,7 @@ func VisibilityManagerProvider(
 		serviceConfig.VisibilityPersistenceMaxReadQPS,
 		serviceConfig.VisibilityPersistenceMaxWriteQPS,
 		serviceConfig.OperatorRPSRatio,
+		serviceConfig.VisibilityPersistenceSlowQueryThreshold,
 		serviceConfig.EnableReadFromSecondaryVisibility,
 		serviceConfig.VisibilityEnableShadowReadMode,
 		dynamicconfig.GetStringPropertyFn(visibility.SecondaryVisibilityWritingModeOff), // worker visibility never write

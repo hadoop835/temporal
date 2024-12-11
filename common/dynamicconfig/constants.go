@@ -84,6 +84,11 @@ var (
 		9000,
 		`VisibilityPersistenceMaxWriteQPS is the max QPC system host can query visibility DB for write.`,
 	)
+	VisibilityPersistenceSlowQueryThreshold = NewGlobalDurationSetting(
+		"system.visibilityPersistenceSlowQueryThreshold",
+		time.Second,
+		`VisibilityPersistenceSlowQueryThreshold is the threshold above which a query is considered slow and logged.`,
+	)
 	EnableReadFromSecondaryVisibility = NewNamespaceBoolSetting(
 		"system.enableReadFromSecondaryVisibility",
 		false,
@@ -484,7 +489,9 @@ Deleted Redirect Rules will be kept in the DB (with DeleteTimestamp). After this
 		"matching.wv.ReachabilityBuildIdVisibilityGracePeriod",
 		3*time.Minute,
 		`ReachabilityBuildIdVisibilityGracePeriod is the time period for which deleted versioning rules are still considered active
-to account for the delay in updating the build id field in visibility.`,
+to account for the delay in updating the build id field in visibility. Not yet supported for GetDeploymentReachability. We recommend waiting
+at least 2 minutes between changing the current deployment and calling GetDeployment, so that newly started workflow executions using the
+recently-current deployment can arrive in visibility.`,
 	)
 	ReachabilityTaskQueueScanLimit = NewGlobalIntSetting(
 		"limit.reachabilityTaskQueueScan",
@@ -570,7 +577,12 @@ is currently processing a task.
 	)
 
 	// keys for frontend
-
+	FrontendHTTPAllowedHosts = NewGlobalTypedSetting(
+		"frontend.httpAllowedHosts",
+		[]string(nil),
+		`HTTP API Requests with a "Host" header matching the allowed hosts will be processed, otherwise rejected.
+Wildcards (*) are expanded to allow any substring. By default any Host header is allowed.`,
+	)
 	FrontendPersistenceMaxQPS = NewGlobalIntSetting(
 		"frontend.persistenceMaxQPS",
 		2000,
@@ -845,12 +857,26 @@ of Timeout and if no activity is seen even after that the connection is closed.`
 		true,
 		`FrontendEnableSchedules enables schedule-related RPCs in the frontend`,
 	)
+	EnableDeployments = NewNamespaceBoolSetting(
+		"system.enableDeployments",
+		false,
+		`EnableDeployments enables deployments (versioning v3) in all services,
+including deployment-related RPCs in the frontend, deployment entity workflows in the worker,
+and deployment interaction in matching and history.`,
+	)
 	EnableNexus = NewGlobalBoolSetting(
 		"system.enableNexus",
 		false,
 		`EnableNexus toggles all Nexus functionality on the server. Note that toggling this requires restarting
 server hosts for it to take effect.`,
 	)
+
+	AllowDeleteNamespaceIfNexusEndpointTarget = NewGlobalBoolSetting(
+		"frontend.allowDeleteNamespaceIfNexusEndpointTarget",
+		false,
+		`If set to true (default is false), namespaces that are Nexus endpoint targets will be prevented from being deleted.`,
+	)
+
 	RefreshNexusEndpointsLongPollTimeout = NewGlobalDurationSetting(
 		"system.refreshNexusEndpointsLongPollTimeout",
 		5*time.Minute,
@@ -1107,25 +1133,25 @@ Note: this should be greater than matching.longPollExpirationInterval and matchi
 	MetricsBreakdownByTaskQueue = NewTaskQueueBoolSetting(
 		"metrics.breakdownByTaskQueue",
 		true,
-		`MetricsBreakdownByTaskQueue determines if the 'taskqueue' tag in Matching and History metrics should 
-contain the actual TQ name or a generic __omitted__ value. Disable this option if the cardinality is too high for your 
+		`MetricsBreakdownByTaskQueue determines if the 'taskqueue' tag in Matching and History metrics should
+contain the actual TQ name or a generic __omitted__ value. Disable this option if the cardinality is too high for your
 observability stack. Disabling this option will disable all the per-Task Queue gauges such as backlog lag, count, and age.`,
 	)
 	MetricsBreakdownByPartition = NewTaskQueueBoolSetting(
 		"metrics.breakdownByPartition",
 		true,
-		`MetricsBreakdownByPartition determines if the 'partition' tag in Matching metrics should 
-contain the actual normal partition ID or a generic __normal__ value. Regardless of this config, the tag value for sticky 
-queues will be "__sticky__". Disable this option if the partition cardinality is too high for your 
+		`MetricsBreakdownByPartition determines if the 'partition' tag in Matching metrics should
+contain the actual normal partition ID or a generic __normal__ value. Regardless of this config, the tag value for sticky
+queues will be "__sticky__". Disable this option if the partition cardinality is too high for your
 observability stack. Disabling this option will disable all the per-Task Queue gauges such as backlog lag, count, and age.`,
 	)
 	MetricsBreakdownByBuildID = NewTaskQueueBoolSetting(
 		"metrics.breakdownByBuildID",
 		true,
-		`MetricsBreakdownByBuildID determines if the 'worker-build-id' tag in Matching metrics should 
-contain the actual Build ID or a generic "__versioned__" value. Regardless of this config, the tag value for unversioned 
-queues will be "__unversioned__". Disable this option if the Build ID cardinality is too high for your 
-observability stack. Disabling this option will disable all the per-Task Queue gauges such as backlog lag, count, and age 
+		`MetricsBreakdownByBuildID determines if the 'worker-build-id' tag in Matching metrics should
+contain the actual Build ID or a generic "__versioned__" value. Regardless of this config, the tag value for unversioned
+queues will be "__unversioned__". Disable this option if the Build ID cardinality is too high for your
+observability stack. Disabling this option will disable all the per-Task Queue gauges such as backlog lag, count, and age
 for VERSIONED queues.`,
 	)
 	MatchingForwarderMaxOutstandingPolls = NewTaskQueueIntSetting(
@@ -1202,6 +1228,16 @@ these log lines can be noisy, we want to be able to turn on and sample selective
 		"matching.TaskQueueInfoByBuildIdTTL",
 		time.Second,
 		`TaskQueueInfoByBuildIdTTL serves as a TTL for the cache holding DescribeTaskQueue partition results`,
+	)
+	MatchingDropNonRetryableTasks = NewGlobalBoolSetting(
+		"matching.dropNonRetryableTasks",
+		false,
+		`MatchingDropNonRetryableTasks states if we should drop matching tasks with Internal/Dataloss errors`,
+	)
+	MatchingMaxTaskQueuesInDeployment = NewNamespaceIntSetting(
+		"matching.maxTaskQueuesInDeployment",
+		1000,
+		`MatchingMaxTaskQueuesInDeployment represents the maximum number of task-queues that can be registed in a single deployment`,
 	)
 	// for matching testing only:
 
@@ -1523,6 +1559,11 @@ If value less or equal to 0, will fall back to TaskSchedulerNamespaceMaxQPS`,
 		`TaskSchedulerNamespaceMaxQPS is the max qps task schedulers on a host can schedule tasks for a certain namespace
 If value less or equal to 0, will fall back to HistoryPersistenceNamespaceMaxQPS`,
 	)
+	TaskSchedulerInactiveChannelDeletionDelay = NewGlobalDurationSetting(
+		"history.taskSchedulerInactiveChannelDeletionDelay",
+		time.Hour,
+		`TaskSchedulerInactiveChannelDeletionDelay the time delay before a namespace's' channel is removed from the scheduler`,
+	)
 
 	TimerTaskBatchSize = NewGlobalIntSetting(
 		"history.timerTaskBatchSize",
@@ -1842,10 +1883,23 @@ the outbound standby task failed to be processed due to missing events.`,
 close task has been processed. Must use Elasticsearch as visibility store, otherwise workflow
 data (eg: search attributes) will be lost after workflow is closed.`,
 	)
+	VisibilityProcessorRelocateAttributesMinBlobSize = NewNamespaceIntSetting(
+		"history.visibilityProcessorRelocateAttributesMinBlobSize",
+		0,
+		`VisibilityProcessorRelocateAttributesMinBlobSize is the minimum size in bytes of memo or search
+attributes.`,
+	)
 	VisibilityQueueMaxReaderCount = NewGlobalIntSetting(
 		"history.visibilityQueueMaxReaderCount",
 		2,
 		`VisibilityQueueMaxReaderCount is the max number of readers in one multi-cursor visibility queue`,
+	)
+
+	DisableFetchRelocatableAttributesFromVisibility = NewNamespaceBoolSetting(
+		"history.disableFetchRelocatableAttributesFromVisibility",
+		false,
+		`DisableFetchRelocatableAttributesFromVisibility disables fetching memo and search attributes from
+visibility if they were removed from the mutable state`,
 	)
 
 	ArchivalTaskBatchSize = NewGlobalIntSetting(
@@ -2003,6 +2057,11 @@ the user has not specified an explicit RetryPolicy`,
 		`DefaultWorkflowRetryPolicy represents the out-of-box retry policy for unset fields
 where the user has set an explicit RetryPolicy, but not specified all the fields`,
 	)
+	AllowResetWithPendingChildren = NewNamespaceBoolSetting(
+		"history.allowResetWithPendingChildren",
+		false,
+		`Allows resetting of workflows with pending children when set to true`,
+	)
 	HistoryMaxAutoResetPoints = NewNamespaceIntSetting(
 		"history.historyMaxAutoResetPoints",
 		primitives.DefaultHistoryMaxAutoResetPoints,
@@ -2043,6 +2102,11 @@ the number of children greater than or equal to this threshold`,
 		"history.workflowTaskRetryMaxInterval",
 		time.Minute*10,
 		`WorkflowTaskRetryMaxInterval is the maximum interval added to a workflow task's startToClose timeout for slowing down retry`,
+	)
+	DiscardSpeculativeWorkflowTaskMaximumEventsCount = NewGlobalIntSetting(
+		"history.discardSpeculativeWorkflowTaskMaximumEventsCount",
+		10,
+		`If speculative workflow task shipped more than DiscardSpeculativeWorkflowTaskMaximumEventsCount events, it can't be discarded`,
 	)
 	DefaultWorkflowTaskTimeout = NewNamespaceDurationSetting(
 		"history.defaultWorkflowTaskTimeout",
@@ -2181,6 +2245,12 @@ Do not turn this on if you aren't using Cassandra as the history task DLQ is not
 		"history.TaskDLQUnexpectedErrorAttempts",
 		70, // 70 attempts takes about an hour
 		`HistoryTaskDLQUnexpectedErrorAttempts is the number of task execution attempts before sending the task to DLQ.`,
+	)
+	HistoryTaskDLQInternalErrors = NewGlobalBoolSetting(
+		"history.TaskDLQInternalErrors",
+		false,
+		`HistoryTaskDLQInternalErrors causes history task processing to send tasks failing with serviceerror.Internal to
+the dlq (or will drop them if not enabled)`,
 	)
 	HistoryTaskDLQErrorPattern = NewGlobalStringSetting(
 		"history.TaskDLQErrorPattern",
@@ -2431,11 +2501,6 @@ Should be at least WorkerESProcessorFlushInterval+<time to process request>.`,
 		true,
 		`HistoryScannerVerifyRetention indicates the history scanner verify data retention.
 If the service configures with archival feature enabled, update worker.historyScannerVerifyRetention to be double of the data retention.`,
-	)
-	EnableBatcherGlobal = NewGlobalBoolSetting(
-		"worker.enableBatcher",
-		true,
-		`EnableBatcher decides whether to start old (system namespace) batcher in our worker`,
 	)
 	EnableBatcherNamespace = NewNamespaceBoolSetting(
 		"worker.enableNamespaceBatcher",

@@ -66,6 +66,7 @@ import (
 	"go.temporal.io/server/service"
 	"go.temporal.io/server/service/frontend/configs"
 	"go.temporal.io/server/service/history/tasks"
+	"go.temporal.io/server/service/worker/deployment"
 	"go.temporal.io/server/service/worker/scheduler"
 	"go.uber.org/fx"
 	"google.golang.org/grpc"
@@ -86,6 +87,7 @@ var Module = fx.Options(
 	resource.Module,
 	scheduler.Module,
 	dynamicconfig.Module,
+	deployment.Module,
 	// Note that with this approach routes may be registered in arbitrary order.
 	// This is okay because our routes don't have overlapping matches.
 	// The only important detail is that the PathPrefix("/") route registered in the HTTPAPIServerProvider comes last.
@@ -220,7 +222,7 @@ func GrpcServerOptionsProvider(
 	retryableInterceptor *interceptor.RetryableInterceptor,
 	healthInterceptor *interceptor.HealthInterceptor,
 	rateLimitInterceptor *interceptor.RateLimitInterceptor,
-	traceInterceptor telemetry.ServerTraceInterceptor,
+	traceStatsHandler telemetry.ServerStatsHandler,
 	sdkVersionInterceptor *interceptor.SDKVersionInterceptor,
 	callerInfoInterceptor *interceptor.CallerInfoInterceptor,
 	authInterceptor *authorization.Interceptor,
@@ -263,7 +265,6 @@ func GrpcServerOptionsProvider(
 		utf8Validator.Intercept,
 		namespaceValidatorInterceptor.NamespaceValidateIntercept,
 		namespaceLogInterceptor.Intercept, // TODO: Deprecate this with a outer custom interceptor
-		grpc.UnaryServerInterceptor(traceInterceptor),
 		metrics.NewServerMetricsContextInjectorInterceptor(),
 		authInterceptor.Intercept,
 		redirectionInterceptor.Intercept,
@@ -294,6 +295,9 @@ func GrpcServerOptionsProvider(
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(streamInterceptor...),
 	)
+	if traceStatsHandler != nil {
+		grpcServerOptions = append(grpcServerOptions, grpc.StatsHandler(traceStatsHandler))
+	}
 	return GrpcServerOptions{Options: grpcServerOptions, UnaryInterceptors: unaryInterceptors}
 }
 
@@ -552,6 +556,7 @@ func VisibilityManagerProvider(
 		serviceConfig.VisibilityPersistenceMaxReadQPS,
 		serviceConfig.VisibilityPersistenceMaxWriteQPS,
 		serviceConfig.OperatorRPSRatio,
+		serviceConfig.VisibilityPersistenceSlowQueryThreshold,
 		serviceConfig.EnableReadFromSecondaryVisibility,
 		serviceConfig.VisibilityEnableShadowReadMode,
 		dynamicconfig.GetStringPropertyFn(visibility.SecondaryVisibilityWritingModeOff), // frontend visibility never write
@@ -656,6 +661,7 @@ func OperatorHandlerProvider(
 	clusterMetadataManager persistence.ClusterMetadataManager,
 	clusterMetadata cluster.Metadata,
 	clientFactory client.Factory,
+	namespaceRegistry namespace.Registry,
 	nexusEndpointClient *NexusEndpointClient,
 ) *OperatorHandlerImpl {
 	args := NewOperatorHandlerImplArgs{
@@ -671,6 +677,7 @@ func OperatorHandlerProvider(
 		clusterMetadataManager,
 		clusterMetadata,
 		clientFactory,
+		namespaceRegistry,
 		nexusEndpointClient,
 	}
 	return NewOperatorHandlerImpl(args)
@@ -690,6 +697,7 @@ func HandlerProvider(
 	clientBean client.Bean,
 	historyClient resource.HistoryClient,
 	matchingClient resource.MatchingClient,
+	deploymentStoreClient deployment.DeploymentStoreClient,
 	archiverProvider provider.ArchiverProvider,
 	metricsHandler metrics.Handler,
 	payloadSerializer serialization.Serializer,
@@ -715,6 +723,7 @@ func HandlerProvider(
 		persistenceMetadataManager,
 		historyClient,
 		matchingClient,
+		deploymentStoreClient,
 		archiverProvider,
 		payloadSerializer,
 		namespaceRegistry,

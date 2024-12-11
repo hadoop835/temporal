@@ -144,6 +144,9 @@ func (s *SyncStateRetrieverImpl) GetSyncWorkflowStateArtifact(
 			releaseFunc(retError)
 		}
 	}()
+	if mutableState.HasBufferedEvents() {
+		return nil, serviceerror.NewWorkflowNotReady("workflow has buffered events")
+	}
 
 	if len(mutableState.GetExecutionInfo().TransitionHistory) == 0 {
 		// workflow essentially in an unknown state
@@ -193,7 +196,12 @@ func (s *SyncStateRetrieverImpl) getSyncStateResult(
 		}
 		tombstoneBatch := mutableState.GetExecutionInfo().SubStateMachineTombstoneBatches
 		if len(tombstoneBatch) == 0 {
-			return true
+			return false
+		}
+		if mutableState.GetExecutionInfo().LastTransitionHistoryBreakPoint != nil &&
+			// the target transition falls into the previous break point, need to send snapshot
+			workflow.CompareVersionedTransition(mutableState.GetExecutionInfo().LastTransitionHistoryBreakPoint, targetCurrentVersionedTransition) >= 0 {
+			return false
 		}
 		if workflow.CompareVersionedTransition(tombstoneBatch[0].VersionedTransition, targetCurrentVersionedTransition) <= 0 {
 			return true
@@ -363,14 +371,12 @@ func (s *SyncStateRetrieverImpl) getMutation(mutableState workflow.MutableState,
 			break
 		}
 	}
-	mutableStateClone.ExecutionInfo.UpdateInfos = nil
-	mutableStateClone.ExecutionInfo.SubStateMachinesByType = nil
-	mutableStateClone.ExecutionInfo.SubStateMachineTombstoneBatches = nil
+
 	var signalRequestedIds []string
 	if workflow.CompareVersionedTransition(mutableStateClone.ExecutionInfo.SignalRequestIdsLastUpdateVersionedTransition, versionedTransition) > 0 {
 		signalRequestedIds = mutableStateClone.SignalRequestedIds
 	}
-	return &persistencepb.WorkflowMutableStateMutation{
+	mutation := &persistencepb.WorkflowMutableStateMutation{
 		UpdatedActivityInfos:            getUpdatedInfo(mutableStateClone.ActivityInfos, versionedTransition),
 		UpdatedTimerInfos:               getUpdatedInfo(mutableStateClone.TimerInfos, versionedTransition),
 		UpdatedChildExecutionInfos:      getUpdatedInfo(mutableStateClone.ChildExecutionInfos, versionedTransition),
@@ -382,7 +388,11 @@ func (s *SyncStateRetrieverImpl) getMutation(mutableState workflow.MutableState,
 		SignalRequestedIds:              signalRequestedIds,
 		ExecutionInfo:                   mutableStateClone.ExecutionInfo,
 		ExecutionState:                  mutableStateClone.ExecutionState,
-	}, nil
+	}
+	mutableStateClone.ExecutionInfo.UpdateInfos = nil
+	mutableStateClone.ExecutionInfo.SubStateMachinesByType = nil
+	mutableStateClone.ExecutionInfo.SubStateMachineTombstoneBatches = nil
+	return mutation, nil
 }
 
 func (s *SyncStateRetrieverImpl) getSnapshot(mutableState workflow.MutableState) (*persistencepb.WorkflowMutableState, error) {
@@ -418,7 +428,7 @@ func (s *SyncStateRetrieverImpl) getEventsBlob(
 				break
 			}
 			left := endEventId - startEventId
-			if !isNewRun && int64(len(xdcCacheValue.EventBlobs)) >= left {
+			if !isNewRun && int64(len(xdcCacheValue.EventBlobs)) > left {
 				s.logger.Error(
 					fmt.Sprintf("xdc cached events are truncated, want [%d, %d), got [%d, %d) from cache",
 						startEventId, endEventId, startEventId, xdcCacheValue.NextEventID),

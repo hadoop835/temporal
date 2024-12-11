@@ -36,7 +36,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-
 	commandpb "go.temporal.io/api/command/v1"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -557,14 +556,15 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletion() {
 	s.Greater(startedEventIdx, 0)
 
 	s.Len(pollResp.History.Events[startedEventIdx].Links, 1)
-	protorequire.ProtoEqual(s.T(), handlerLink, pollResp.History.Events[startedEventIdx].Links[0].GetWorkflowEvent())
+	l := pollResp.History.Events[startedEventIdx].Links[0].GetWorkflowEvent()
+	protorequire.ProtoEqual(s.T(), handlerLink, l)
 
 	// Completion request fails if the result payload is too large.
 	largeCompletion, err := nexus.NewOperationCompletionSuccessful(
 		// Use -10 to avoid hitting MaxNexusAPIRequestBodyBytes. Actual payload will still exceed limit because of
 		// additional Content headers. See common/rpc/grpc.go:66
 		s.mustToPayload(strings.Repeat("a", (2*1024*1024)-10)),
-		nexus.OperationCompletionSuccesfulOptions{Serializer: commonnexus.PayloadSerializer},
+		nexus.OperationCompletionSuccessfulOptions{Serializer: commonnexus.PayloadSerializer},
 	)
 	s.NoError(err)
 	res, snap := s.sendNexusCompletionRequest(ctx, s.T(), publicCallbackUrl, largeCompletion, callbackToken)
@@ -572,7 +572,7 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletion() {
 	s.Equal(1, len(snap["nexus_completion_requests"]))
 	s.Subset(snap["nexus_completion_requests"][0].Tags, map[string]string{"namespace": s.Namespace(), "outcome": "error_bad_request"})
 
-	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload(nil), nexus.OperationCompletionSuccesfulOptions{
+	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload(nil), nexus.OperationCompletionSuccessfulOptions{
 		Serializer: commonnexus.PayloadSerializer,
 	})
 	s.NoError(err)
@@ -621,7 +621,7 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletion() {
 	s.Subset(snap["nexus_completion_requests"][0].Tags, map[string]string{"namespace": s.Namespace(), "outcome": "error_not_found"})
 
 	// Send a valid - successful completion request.
-	completion, err = nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccesfulOptions{
+	completion, err = nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccessfulOptions{
 		Serializer: commonnexus.PayloadSerializer,
 	})
 	s.NoError(err)
@@ -731,6 +731,210 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletion() {
 		}
 	}
 	s.False(seenCompletedEvent)
+}
+
+func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletionBeforeStart() {
+	ctx := testcore.NewContext()
+	taskQueue := testcore.RandomizeStr(s.T().Name())
+	endpointName := testcore.RandomizedNexusEndpoint(s.T().Name())
+
+	_, err := s.OperatorClient().CreateNexusEndpoint(ctx, &operatorservice.CreateNexusEndpointRequest{
+		Spec: &nexuspb.EndpointSpec{
+			Name: endpointName,
+			Target: &nexuspb.EndpointTarget{
+				Variant: &nexuspb.EndpointTarget_Worker_{
+					Worker: &nexuspb.EndpointTarget_Worker{
+						Namespace: s.Namespace(),
+						TaskQueue: taskQueue,
+					},
+				},
+			},
+		},
+	})
+	s.NoError(err)
+
+	run, err := s.SdkClient().ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		TaskQueue: taskQueue,
+	}, "workflow")
+	s.NoError(err)
+
+	completionWFType := "completion_wf"
+	completionWFID := testcore.RandomizeStr(s.T().Name())
+	completionWFTaskQueue := testcore.RandomizeStr(s.T().Name())
+	completionWFStartReq := &workflowservice.StartWorkflowExecutionRequest{
+		RequestId:          uuid.NewString(),
+		Namespace:          s.Namespace(),
+		WorkflowId:         completionWFID,
+		WorkflowType:       &commonpb.WorkflowType{Name: completionWFType},
+		TaskQueue:          &taskqueuepb.TaskQueue{Name: completionWFTaskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+		Input:              nil,
+		WorkflowRunTimeout: durationpb.New(100 * time.Second),
+		Identity:           "test",
+	}
+	startLink := &commonpb.Link_WorkflowEvent{
+		Namespace:  s.Namespace(),
+		WorkflowId: completionWFID,
+		Reference: &commonpb.Link_WorkflowEvent_EventRef{
+			EventRef: &commonpb.Link_WorkflowEvent_EventReference{
+				EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+			},
+		},
+	}
+
+	pollResp, err := s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
+		Namespace: s.Namespace(),
+		TaskQueue: &taskqueuepb.TaskQueue{
+			Name: taskQueue,
+			Kind: enumspb.TASK_QUEUE_KIND_NORMAL,
+		},
+		Identity: "test",
+	})
+	s.NoError(err)
+	_, err = s.FrontendClient().RespondWorkflowTaskCompleted(ctx, &workflowservice.RespondWorkflowTaskCompletedRequest{
+		Identity:  "test",
+		TaskToken: pollResp.TaskToken,
+		Commands: []*commandpb.Command{
+			{
+				CommandType: enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+				Attributes: &commandpb.Command_ScheduleNexusOperationCommandAttributes{
+					ScheduleNexusOperationCommandAttributes: &commandpb.ScheduleNexusOperationCommandAttributes{
+						Endpoint:  endpointName,
+						Service:   "test-service",
+						Operation: "my-operation",
+						Input:     s.mustToPayload("input"),
+					},
+				},
+			},
+		},
+	})
+	s.NoError(err)
+
+	// Poll for the Nexus task
+	res, err := s.FrontendClient().PollNexusTaskQueue(ctx, &workflowservice.PollNexusTaskQueueRequest{
+		Namespace: s.Namespace(),
+		Identity:  uuid.NewString(),
+		TaskQueue: &taskqueuepb.TaskQueue{
+			Name: taskQueue,
+			Kind: enumspb.TASK_QUEUE_KIND_NORMAL,
+		},
+	})
+	s.NoError(err)
+
+	start := res.Request.Variant.(*nexuspb.Request_StartOperation).StartOperation
+	s.Equal(op.Name(), start.Operation)
+	start.CallbackHeader[nexus.HeaderOperationID] = completionWFID
+	completionWFStartReq.CompletionCallbacks = []*commonpb.Callback{
+		{
+			Variant: &commonpb.Callback_Nexus_{
+				Nexus: &commonpb.Callback_Nexus{
+					Url:    start.Callback,
+					Header: start.CallbackHeader,
+				},
+			},
+		},
+	}
+
+	completionRun, err := s.FrontendClient().StartWorkflowExecution(ctx, completionWFStartReq)
+	s.NoError(err)
+	startLink.RunId = completionRun.RunId
+
+	// Complete workflow containing callback
+	pollResp, err = s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
+		Namespace: s.Namespace(),
+		TaskQueue: &taskqueuepb.TaskQueue{
+			Name: completionWFTaskQueue,
+			Kind: enumspb.TASK_QUEUE_KIND_NORMAL,
+		},
+		Identity: "test",
+	})
+	s.NoError(err)
+	_, err = s.FrontendClient().RespondWorkflowTaskCompleted(ctx, &workflowservice.RespondWorkflowTaskCompletedRequest{
+		Identity:  "test",
+		TaskToken: pollResp.TaskToken,
+		Commands: []*commandpb.Command{
+			{
+				CommandType: enumspb.COMMAND_TYPE_COMPLETE_WORKFLOW_EXECUTION,
+				Attributes: &commandpb.Command_CompleteWorkflowExecutionCommandAttributes{
+					CompleteWorkflowExecutionCommandAttributes: &commandpb.CompleteWorkflowExecutionCommandAttributes{
+						Result: &commonpb.Payloads{
+							Payloads: []*commonpb.Payload{
+								s.mustToPayload("result"),
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	s.NoError(err)
+
+	// Poll and verify the fabricated start event and completion event are recorded and triggers workflow progress.
+	pollResp, err = s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
+		Namespace: s.Namespace(),
+		TaskQueue: &taskqueuepb.TaskQueue{
+			Name: taskQueue,
+			Kind: enumspb.TASK_QUEUE_KIND_NORMAL,
+		},
+		Identity: "test",
+	})
+	s.NoError(err)
+	startedEventIdx := slices.IndexFunc(pollResp.History.Events, func(e *historypb.HistoryEvent) bool {
+		return e.GetNexusOperationStartedEventAttributes() != nil
+	})
+	s.Len(pollResp.History.Events[startedEventIdx].Links, 1)
+	startedEvent := pollResp.History.Events[startedEventIdx].GetNexusOperationStartedEventAttributes()
+	s.Equal(completionWFID, startedEvent.OperationId)
+	l := pollResp.History.Events[startedEventIdx].Links[0].GetWorkflowEvent()
+	protorequire.ProtoEqual(s.T(), startLink, l)
+	s.Greater(startedEventIdx, 0)
+	completedEventIdx := slices.IndexFunc(pollResp.History.Events, func(e *historypb.HistoryEvent) bool {
+		return e.GetNexusOperationCompletedEventAttributes() != nil
+	})
+	s.Greater(completedEventIdx, 0)
+
+	// Complete start request to verify response is ignored.
+	_, err = s.FrontendClient().RespondNexusTaskCompleted(ctx, &workflowservice.RespondNexusTaskCompletedRequest{
+		Namespace: s.Namespace(),
+		Identity:  uuid.NewString(),
+		TaskToken: res.TaskToken,
+		Response: &nexuspb.Response{
+			Variant: &nexuspb.Response_StartOperation{
+				StartOperation: &nexuspb.StartOperationResponse{
+					Variant: &nexuspb.StartOperationResponse_AsyncSuccess{
+						AsyncSuccess: &nexuspb.StartOperationResponse_Async{
+							OperationId: completionWFID,
+						},
+					},
+				},
+			},
+		},
+	})
+	s.NoErrorf(err, "Duplicate start response should be ignored.")
+
+	// Complete caller workflow
+	_, err = s.FrontendClient().RespondWorkflowTaskCompleted(ctx, &workflowservice.RespondWorkflowTaskCompletedRequest{
+		Identity:  "test",
+		TaskToken: pollResp.TaskToken,
+		Commands: []*commandpb.Command{
+			{
+				CommandType: enumspb.COMMAND_TYPE_COMPLETE_WORKFLOW_EXECUTION,
+				Attributes: &commandpb.Command_CompleteWorkflowExecutionCommandAttributes{
+					CompleteWorkflowExecutionCommandAttributes: &commandpb.CompleteWorkflowExecutionCommandAttributes{
+						Result: &commonpb.Payloads{
+							Payloads: []*commonpb.Payload{
+								pollResp.History.Events[completedEventIdx].GetNexusOperationCompletedEventAttributes().Result,
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	s.NoError(err)
+	var result string
+	s.NoError(run.Get(ctx, &result))
+	s.Equal("result", result)
 }
 
 func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncFailure() {
@@ -876,7 +1080,7 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncFailure() {
 func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletionErrors() {
 	ctx := testcore.NewContext()
 
-	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccesfulOptions{
+	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccessfulOptions{
 		Serializer: commonnexus.PayloadSerializer,
 	})
 	s.NoError(err)
@@ -939,7 +1143,7 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletionAuthErrors() {
 	s.GetTestCluster().Host().SetOnAuthorize(onAuthorize)
 	defer s.GetTestCluster().Host().SetOnAuthorize(nil)
 
-	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccesfulOptions{
+	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccessfulOptions{
 		Serializer: commonnexus.PayloadSerializer,
 	})
 	s.NoError(err)
@@ -1377,7 +1581,7 @@ func (s *NexusWorkflowTestSuite) TestNexusOperationAsyncCompletionAfterReset() {
 		}
 	}
 	s.True(seenStartedEvent)
-	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccesfulOptions{
+	completion, err := nexus.NewOperationCompletionSuccessful(s.mustToPayload("result"), nexus.OperationCompletionSuccessfulOptions{
 		Serializer: commonnexus.PayloadSerializer,
 	})
 	s.NoError(err)
@@ -1469,6 +1673,10 @@ func (s *NexusWorkflowTestSuite) TestNexusAsyncOperationWithNilIO() {
 	callerWF := func(ctx workflow.Context, input nexus.NoValue) (nexus.NoValue, error) {
 		c := workflow.NewNexusClient(endpointName, svc.Name)
 		fut := c.ExecuteOperation(ctx, op, nil, workflow.NexusOperationOptions{})
+		var opExec workflow.NexusOperationExecution
+		err := fut.GetNexusOperationExecution().Get(ctx, &opExec)
+		s.NoError(err)
+		s.Equal(handlerWorkflowID, opExec.OperationID)
 		return nil, fut.Get(ctx, nil)
 	}
 

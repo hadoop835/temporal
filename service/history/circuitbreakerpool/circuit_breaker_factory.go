@@ -20,30 +20,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package scheduler
+package circuitbreakerpool
 
 import (
-	enumspb "go.temporal.io/api/enums/v1"
-	persistencepb "go.temporal.io/server/api/persistence/v1"
-	"go.temporal.io/server/common/persistence/serialization"
-	"google.golang.org/protobuf/proto"
+	"go.temporal.io/server/common/circuitbreaker"
+	"go.temporal.io/server/common/collection"
 )
 
-type ProcessWorkflowCompletionEvent struct{}
-
-func (p ProcessWorkflowCompletionEvent) Name() string {
-	return "scheduler.process_workflow_completion_event"
+type CircuitBreakerPool[K comparable] struct {
+	m *collection.OnceMap[K, circuitbreaker.TwoStepCircuitBreaker]
 }
 
-func (p ProcessWorkflowCompletionEvent) SerializeOutput(_ any) ([]byte, error) {
-	// ProcessWorkflowCompletionEvent outputs void and therefore does nothing for serialization.
-	return nil, nil
+func (p *CircuitBreakerPool[K]) Get(key K) circuitbreaker.TwoStepCircuitBreaker {
+	return p.m.Get(key)
 }
 
-func (p ProcessWorkflowCompletionEvent) DeserializeInput(data []byte) (any, error) {
-	output := &persistencepb.HSMCompletionCallbackArg{}
-	if err := proto.Unmarshal(data, output); err != nil {
-		return nil, serialization.NewDeserializationError(enumspb.ENCODING_TYPE_PROTO3, err)
+func NewCircuitBreakerPool[K comparable](
+	constructor func(key K) circuitbreaker.TwoStepCircuitBreaker,
+) *CircuitBreakerPool[K] {
+	return &CircuitBreakerPool[K]{
+		m: collection.NewOnceMap(constructor),
 	}
-	return output, nil
 }

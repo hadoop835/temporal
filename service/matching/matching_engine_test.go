@@ -239,7 +239,8 @@ func newMatchingEngine(
 func (s *matchingEngineSuite) newPartitionManager(prtn tqid.Partition, config *Config) taskQueuePartitionManager {
 	tqConfig := newTaskQueueConfig(prtn.TaskQueue(), config, matchingTestNamespace)
 
-	pm, err := newTaskQueuePartitionManager(s.matchingEngine, s.ns, prtn, tqConfig, &mockUserDataManager{})
+	logger, _, metricsHandler := s.matchingEngine.loggerAndMetricsForPartition(matchingTestNamespace, prtn, tqConfig)
+	pm, err := newTaskQueuePartitionManager(s.matchingEngine, s.ns, prtn, tqConfig, logger, logger, metricsHandler, &mockUserDataManager{})
 	s.Require().NoError(err)
 	return pm
 }
@@ -471,6 +472,7 @@ func (s *matchingEngineSuite) TestFailAddTaskWithHistoryExhausted() {
 }
 
 func (s *matchingEngineSuite) TestFailAddTaskWithHistoryError() {
+	s.matchingEngine.config.MatchingDropNonRetryableTasks = dynamicconfig.GetBoolPropertyFn(true)
 	historyError := serviceerror.NewInternal("nothing to start")
 	tqName := "testFailAddTaskWithHistoryError"
 	s.testFailAddTaskWithHistoryError(tqName, true, historyError, nil) // expectedError shall be nil since history drops the task
@@ -691,6 +693,7 @@ func (s *matchingEngineSuite) TestPollWorkflowTaskQueues_NamespaceHandover() {
 }
 
 func (s *matchingEngineSuite) TestPollActivityTaskQueues_InternalError() {
+	s.matchingEngine.config.MatchingDropNonRetryableTasks = dynamicconfig.GetBoolPropertyFn(true)
 	namespaceId := uuid.New()
 	tl := "queue"
 	taskQueue := &taskqueuepb.TaskQueue{Name: "queue", Kind: enumspb.TASK_QUEUE_KIND_NORMAL}
@@ -723,6 +726,8 @@ func (s *matchingEngineSuite) TestPollActivityTaskQueues_InternalError() {
 }
 
 func (s *matchingEngineSuite) TestPollActivityTaskQueues_DataLossError() {
+	s.matchingEngine.config.MatchingDropNonRetryableTasks = dynamicconfig.GetBoolPropertyFn(true)
+
 	namespaceId := uuid.New()
 	tl := "queue"
 	taskQueue := &taskqueuepb.TaskQueue{Name: "queue", Kind: enumspb.TASK_QUEUE_KIND_NORMAL}
@@ -756,6 +761,8 @@ func (s *matchingEngineSuite) TestPollActivityTaskQueues_DataLossError() {
 }
 
 func (s *matchingEngineSuite) TestPollWorkflowTaskQueues_InternalError() {
+	s.matchingEngine.config.MatchingDropNonRetryableTasks = dynamicconfig.GetBoolPropertyFn(true)
+
 	tqName := "queue"
 	taskQueue := &taskqueuepb.TaskQueue{Name: tqName, Kind: enumspb.TASK_QUEUE_KIND_NORMAL}
 	wfExecution := &commonpb.WorkflowExecution{WorkflowId: "workflowID", RunId: uuid.NewRandom().String()}
@@ -780,6 +787,8 @@ func (s *matchingEngineSuite) TestPollWorkflowTaskQueues_InternalError() {
 }
 
 func (s *matchingEngineSuite) TestPollWorkflowTaskQueues_DataLossError() {
+	s.matchingEngine.config.MatchingDropNonRetryableTasks = dynamicconfig.GetBoolPropertyFn(true)
+
 	tqName := "queue"
 	taskQueue := &taskqueuepb.TaskQueue{Name: tqName, Kind: enumspb.TASK_QUEUE_KIND_NORMAL}
 	wfExecution := &commonpb.WorkflowExecution{WorkflowId: "workflowID", RunId: uuid.NewRandom().String()}
@@ -2969,13 +2978,18 @@ func (s *matchingEngineSuite) TestUpdatePhysicalTaskQueueGauge_VersionSet() {
 	// the size of the map to 1 and it's counter to 1.
 	s.PhysicalQueueMetricValidator(capture, 1, 1)
 
-	Vqtpm, err := tqm.(*taskQueuePartitionManagerImpl).getVersionedQueueNoWait(versionSet, "", true)
+	vqtpm, err := tqm.(*taskQueuePartitionManagerImpl).getVersionedQueueNoWait(
+		versionSet,
+		"",
+		nil,
+		true,
+	)
 	s.Require().NoError(err)
 
 	// Creating a VersionedQueue results in increasing the size of the map to 2, due to 2 entries now,
 	// with it's counter to 1.
 	s.PhysicalQueueMetricValidator(capture, 2, 1)
-	s.matchingEngine.updatePhysicalTaskQueueGauge(Vqtpm.(*physicalTaskQueueManagerImpl), 1)
+	s.matchingEngine.updatePhysicalTaskQueueGauge(vqtpm.(*physicalTaskQueueManagerImpl), 1)
 	s.PhysicalQueueMetricValidator(capture, 3, 2)
 
 	// Validating if versioned has been set right for the specific parameters
@@ -3006,7 +3020,12 @@ func (s *matchingEngineSuite) TestUpdatePhysicalTaskQueueGauge_BuildID() {
 	// the size of the map to 1 and it's counter to 1.
 	s.PhysicalQueueMetricValidator(capture, 1, 1)
 
-	Vqtpm, err := tqm.(*taskQueuePartitionManagerImpl).getVersionedQueueNoWait("", buildID, true)
+	Vqtpm, err := tqm.(*taskQueuePartitionManagerImpl).getVersionedQueueNoWait(
+		"",
+		buildID,
+		nil,
+		true,
+	)
 	s.Require().NoError(err)
 
 	// Creating a VersionedQueue results in increasing the size of the map to 2, due to 2 entries now,
@@ -3472,12 +3491,11 @@ type testTaskManager struct {
 
 type dbTaskQueueKey struct {
 	partitionKey tqid.PartitionKey
-	versionSet   string
-	buildId      string
+	version      PhysicalTaskQueueVersion
 }
 
 func getKey(dbq *PhysicalTaskQueueKey) dbTaskQueueKey {
-	return dbTaskQueueKey{dbq.partition.Key(), dbq.versionSet, dbq.buildId}
+	return dbTaskQueueKey{dbq.partition.Key(), dbq.Version()}
 }
 
 func newTestTaskManager(logger log.Logger) *testTaskManager {

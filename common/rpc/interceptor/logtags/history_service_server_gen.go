@@ -148,6 +148,11 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerRequest(req any) []tag.Ta
 		return nil
 	case *historyservice.MergeDLQMessagesRequest:
 		return nil
+	case *historyservice.PauseActivityRequest:
+		return []tag.Tag{
+			tag.WorkflowID(r.GetFrontendRequest().GetWorkflowId()),
+			tag.WorkflowRunID(r.GetFrontendRequest().GetRunId()),
+		}
 	case *historyservice.PollMutableStateRequest:
 		return []tag.Tag{
 			tag.WorkflowID(r.GetExecution().GetWorkflowId()),
@@ -219,6 +224,11 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerRequest(req any) []tag.Ta
 			tag.WorkflowID(r.GetCancelRequest().GetWorkflowExecution().GetWorkflowId()),
 			tag.WorkflowRunID(r.GetCancelRequest().GetWorkflowExecution().GetRunId()),
 		}
+	case *historyservice.ResetActivityRequest:
+		return []tag.Tag{
+			tag.WorkflowID(r.GetFrontendRequest().GetWorkflowId()),
+			tag.WorkflowRunID(r.GetFrontendRequest().GetRunId()),
+		}
 	case *historyservice.ResetStickyTaskQueueRequest:
 		return []tag.Tag{
 			tag.WorkflowID(r.GetExecution().GetWorkflowId()),
@@ -274,6 +284,11 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerRequest(req any) []tag.Ta
 			tag.WorkflowID(r.GetTerminateRequest().GetWorkflowExecution().GetWorkflowId()),
 			tag.WorkflowRunID(r.GetTerminateRequest().GetWorkflowExecution().GetRunId()),
 		}
+	case *historyservice.UnpauseActivityRequest:
+		return []tag.Tag{
+			tag.WorkflowID(r.GetFrontendRequest().GetWorkflowId()),
+			tag.WorkflowRunID(r.GetFrontendRequest().GetRunId()),
+		}
 	case *historyservice.UpdateActivityOptionsRequest:
 		return []tag.Tag{
 			tag.WorkflowID(r.GetUpdateRequest().GetWorkflowId()),
@@ -283,6 +298,11 @@ func (wt *WorkflowTags) extractFromHistoryServiceServerRequest(req any) []tag.Ta
 		return []tag.Tag{
 			tag.WorkflowID(r.GetRequest().GetWorkflowExecution().GetWorkflowId()),
 			tag.WorkflowRunID(r.GetRequest().GetWorkflowExecution().GetRunId()),
+		}
+	case *historyservice.UpdateWorkflowExecutionOptionsRequest:
+		return []tag.Tag{
+			tag.WorkflowID(r.GetUpdateRequest().GetWorkflowExecution().GetWorkflowId()),
+			tag.WorkflowRunID(r.GetUpdateRequest().GetWorkflowExecution().GetRunId()),
 		}
 	case *historyservice.VerifyChildExecutionCompletionRecordedRequest:
 		return []tag.Tag{

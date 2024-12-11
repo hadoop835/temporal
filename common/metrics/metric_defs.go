@@ -367,6 +367,8 @@ const (
 	HistoryRecordActivityTaskStartedScope = "RecordActivityTaskStarted"
 	// HistorySignalWithStartWorkflowExecutionScope tracks SignalWithStartWorkflowExecution API calls received by service
 	HistorySignalWithStartWorkflowExecutionScope = "SignalWithStartWorkflowExecution"
+	// HistoryCompleteNexusOperationScope tracks CompleteNexusOperation API calls received by service
+	HistoryCompleteNexusOperationScope = "CompleteNexusOperation"
 	// HistorySyncShardStatusScope tracks HistorySyncShardStatus API calls received by service
 	HistorySyncShardStatusScope = "SyncShardStatus"
 	// HistoryShardControllerScope is the scope used by shard controller
@@ -531,6 +533,8 @@ const (
 	BackfillHistoryEventsTaskScope = "BackfillHistoryEventsTask"
 	// VerifyVersionedTransitionTaskScope is the scope used by verify versioned transition task processing
 	VerifyVersionedTransitionTaskScope = "VerifyVersionedTransitionTask"
+	// SyncVersionedTransitionTaskScope is the scope used by sync versioned transition task processing
+	SyncVersionedTransitionTaskScope = "SyncVersionedTransitionTask"
 	// SyncWatermarkScope is the scope used by closed workflow task replication processing
 	SyncWatermarkScope = "SyncWatermark"
 	// NoopTaskScope is the scope used by noop task

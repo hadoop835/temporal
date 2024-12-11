@@ -300,6 +300,7 @@ func (r *WorkflowStateReplicatorImpl) ReplicateVersionedTransition(
 
 			if localLastWriteVersion > sourceLastWriteVersion {
 				// local is newer, try backfill events
+				releaseFn(nil)
 				return r.backFillEvents(ctx, namespaceID, wid, rid, executionInfo.VersionHistories, versionedTransition.EventBatches, versionedTransition.NewRunInfo, sourceClusterName, sourceTransitionHistory[len(sourceTransitionHistory)-1])
 			}
 			if localLastWriteVersion < sourceLastWriteVersion ||
@@ -321,6 +322,7 @@ func (r *WorkflowStateReplicatorImpl) ReplicateVersionedTransition(
 			}
 			return r.applyMutation(ctx, namespaceID, wid, rid, wfCtx, ms, releaseFn, versionedTransition, sourceClusterName)
 		case errors.Is(err, consts.ErrStaleReference):
+			releaseFn(nil)
 			return r.backFillEvents(ctx, namespaceID, wid, rid, executionInfo.VersionHistories, versionedTransition.EventBatches, versionedTransition.NewRunInfo, sourceClusterName, sourceTransitionHistory[len(sourceTransitionHistory)-1])
 		default:
 			return err
@@ -429,8 +431,8 @@ func (r *WorkflowStateReplicatorImpl) applySnapshot(
 	versionedTransition *repication.VersionedTransitionArtifact,
 	sourceClusterName string,
 ) error {
-	snapshot := versionedTransition.GetSyncWorkflowStateSnapshotAttributes().State
-	if snapshot == nil {
+	attribute := versionedTransition.GetSyncWorkflowStateSnapshotAttributes()
+	if attribute == nil || attribute.State == nil {
 		var versionHistories *history.VersionHistories
 		if localMutableState != nil {
 			versionHistories = localMutableState.GetExecutionInfo().VersionHistories
@@ -444,6 +446,7 @@ func (r *WorkflowStateReplicatorImpl) applySnapshot(
 			versionHistories,
 		)
 	}
+	snapshot := attribute.State
 	if localMutableState == nil {
 		return r.applySnapshotWhenWorkflowNotExist(ctx, namespaceID, workflowID, runID, wfCtx, releaseFn, snapshot, sourceClusterName, versionedTransition.NewRunInfo, true)
 	}
@@ -745,7 +748,7 @@ func (r *WorkflowStateReplicatorImpl) bringLocalEventsUpToSourceCurrentBranch(
 
 		return newVersionHistoryIndex, true, nil
 	}()
-
+	localVersionHistories.CurrentVersionHistoryIndex = index
 	if err != nil {
 		return err
 	}

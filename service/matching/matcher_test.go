@@ -28,12 +28,12 @@ import (
 	"context"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/pborman/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	enumspb "go.temporal.io/api/enums/v1"
 	querypb "go.temporal.io/api/query/v1"
@@ -47,7 +47,6 @@ import (
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/payloads"
 	"go.temporal.io/server/common/tqid"
-	"go.uber.org/atomic"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -423,36 +422,36 @@ func (t *MatcherTestSuite) TestAvoidForwardingWhenBacklogIsOldButReconsider() {
 func (t *MatcherTestSuite) TestBacklogAge() {
 	t.Equal(emptyBacklogAge, t.rootMatcher.getBacklogAge())
 
-	youngBacklogTask := newInternalTaskFromBacklog(randomTaskInfoWithAge(time.Second), nil)
-
 	intruptC := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 
+	youngBacklogTask := newInternalTaskFromBacklog(randomTaskInfoWithAge(time.Second), nil)
 	go t.rootMatcher.MustOffer(ctx, youngBacklogTask, intruptC) //nolint:errcheck
+	time.Sleep(time.Millisecond * 10)                           //nolint:forbidigo
+	t.InDelta(t.rootMatcher.getBacklogAge(), time.Second, float64(100*time.Millisecond))
 
-	time.Sleep(time.Millisecond)
-	t.InDelta(t.rootMatcher.getBacklogAge(), time.Second, float64(10*time.Millisecond))
-
-	// offering the same task twice to make sure of correct counting
-	go t.rootMatcher.MustOffer(ctx, youngBacklogTask, intruptC) //nolint:errcheck
-	time.Sleep(time.Millisecond)
-	t.InDelta(t.rootMatcher.getBacklogAge(), time.Second, float64(10*time.Millisecond))
+	middleBacklogTask := newInternalTaskFromBacklog(randomTaskInfoWithAge(time.Second), nil)
+	// offering a task with the exact creation to make sure of correct counting for each creation time
+	middleBacklogTask.event.Data.CreateTime = youngBacklogTask.event.Data.CreateTime
+	go t.rootMatcher.MustOffer(ctx, middleBacklogTask, intruptC) //nolint:errcheck
+	time.Sleep(time.Millisecond * 10)                            //nolint:forbidigo
+	t.InDelta(t.rootMatcher.getBacklogAge(), time.Second, float64(100*time.Millisecond))
 
 	oldBacklogTask := newInternalTaskFromBacklog(randomTaskInfoWithAge(time.Minute), nil)
 	go t.rootMatcher.MustOffer(ctx, oldBacklogTask, intruptC) //nolint:errcheck
-	time.Sleep(time.Millisecond)
-	t.InDelta(t.rootMatcher.getBacklogAge(), time.Minute, float64(10*time.Millisecond))
+	time.Sleep(time.Millisecond * 10)                         //nolint:forbidigo
+	t.InDelta(t.rootMatcher.getBacklogAge(), time.Minute, float64(100*time.Millisecond))
 
 	task, _ := t.rootMatcher.Poll(ctx, &pollMetadata{})
-	time.Sleep(time.Millisecond)
+	time.Sleep(time.Millisecond * 10) //nolint:forbidigo
 	t.NotNil(task)
 	t.NotEqual(emptyBacklogAge, t.rootMatcher.getBacklogAge())
 	task, _ = t.rootMatcher.Poll(ctx, &pollMetadata{})
-	time.Sleep(time.Millisecond)
+	time.Sleep(time.Millisecond * 10) //nolint:forbidigo
 	t.NotNil(task)
 	t.NotEqual(emptyBacklogAge, t.rootMatcher.getBacklogAge())
 	task, _ = t.rootMatcher.Poll(ctx, &pollMetadata{})
-	time.Sleep(time.Millisecond)
+	time.Sleep(time.Millisecond * 10) //nolint:forbidigo
 	t.NotNil(task)
 	t.Equal(emptyBacklogAge, t.rootMatcher.getBacklogAge())
 
@@ -606,7 +605,7 @@ func (t *MatcherTestSuite) TestQueryRemoteSyncMatch() {
 		}
 	}()
 
-	var querySet = atomic.NewBool(false)
+	var querySet = atomic.Bool{}
 	var remotePollErr error
 	var remotePollResp matchingservice.PollWorkflowTaskQueueResponse
 	t.client.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).Do(
@@ -616,7 +615,7 @@ func (t *MatcherTestSuite) TestQueryRemoteSyncMatch() {
 				remotePollErr = err
 			} else if task.isQuery() {
 				task.finish(nil, true)
-				querySet.Swap(true)
+				querySet.Store(true)
 				remotePollResp = matchingservice.PollWorkflowTaskQueueResponse{
 					Query: &querypb.WorkflowQuery{},
 				}

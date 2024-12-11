@@ -35,7 +35,6 @@ import (
 	"github.com/pborman/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	schedulepb "go.temporal.io/api/schedule/v1"
@@ -53,7 +52,6 @@ import (
 	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/testing/historyrequire"
 	"go.temporal.io/server/common/testing/protorequire"
-	schedulerhsm "go.temporal.io/server/components/scheduler"
 	"go.temporal.io/server/service/worker/scheduler"
 	"go.temporal.io/server/tests/testcore"
 	"google.golang.org/protobuf/proto"
@@ -626,74 +624,6 @@ func (s *ScheduleFunctionalSuite) TestInput() {
 	s.Eventually(func() bool { return atomic.LoadInt32(&runs) == 1 }, 8*time.Second, 200*time.Millisecond)
 }
 
-func (s *ScheduleFunctionalSuite) TestExperimentalHsmInput() {
-	sid := "sched-test-experimental-hsm"
-	wid := "sched-test-experimental-hsm-wf"
-	wt := "sched-test-experimental-hsm-wt"
-
-	s.OverrideDynamicConfig(schedulerhsm.UseExperimentalHsmScheduler, true)
-
-	type myData struct {
-		Stuff  string
-		Things []int
-	}
-
-	input1 := &myData{
-		Stuff:  "here's some data",
-		Things: []int{7, 8, 9},
-	}
-	input2 := map[int]float64{11: 1.4375}
-	inputPayloads, err := s.dataConverter.ToPayloads(input1, input2)
-	s.NoError(err)
-
-	schedule := &schedulepb.Schedule{
-		Spec: &schedulepb.ScheduleSpec{
-			Interval: []*schedulepb.IntervalSpec{
-				{Interval: durationpb.New(3 * time.Second)},
-			},
-		},
-		Action: &schedulepb.ScheduleAction{
-			Action: &schedulepb.ScheduleAction_StartWorkflow{
-				StartWorkflow: &workflowpb.NewWorkflowExecutionInfo{
-					WorkflowId:   wid,
-					WorkflowType: &commonpb.WorkflowType{Name: wt},
-					TaskQueue:    &taskqueuepb.TaskQueue{Name: s.taskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
-					Input:        inputPayloads,
-				},
-			},
-		},
-	}
-	req := &workflowservice.CreateScheduleRequest{
-		Namespace:  s.Namespace(),
-		ScheduleId: sid,
-		Schedule:   schedule,
-		Identity:   "test",
-		RequestId:  uuid.New(),
-	}
-
-	var runs int32
-	workflowFn := func(ctx workflow.Context, arg1 *myData, arg2 map[int]float64) error {
-		workflow.SideEffect(ctx, func(ctx workflow.Context) any {
-			s.Equal(*input1, *arg1)
-			s.Equal(input2, arg2)
-			atomic.AddInt32(&runs, 1)
-			return 0
-		})
-		return nil
-	}
-	s.worker.RegisterWorkflowWithOptions(workflowFn, workflow.RegisterOptions{Name: wt})
-
-	_, err = s.FrontendClient().CreateSchedule(testcore.NewContext(), req)
-	s.NoError(err)
-	s.cleanup(sid)
-
-	s.Eventually(func() bool { return atomic.LoadInt32(&runs) == 1 }, 8*time.Second, 200*time.Millisecond)
-
-	events := s.GetHistory(s.Namespace(), &commonpb.WorkflowExecution{WorkflowId: scheduler.WorkflowIDPrefix + sid})
-	expectedHistory := `1 WorkflowExecutionStarted`
-	s.EqualHistoryEvents(expectedHistory, events)
-}
-
 func (s *ScheduleFunctionalSuite) TestLastCompletionAndError() {
 	sid := "sched-test-last"
 	wid := "sched-test-last-wf"
@@ -748,82 +678,7 @@ func (s *ScheduleFunctionalSuite) TestLastCompletionAndError() {
 		case 2:
 			s.NoError(lastErr)
 			s.Equal("this one succeeds", lcr)
-			return "", errors.New("this one fails") //nolint:goerr113
-		case 3:
-			s.Equal("this one succeeds", lcr)
-			s.ErrorContains(lastErr, "this one fails")
-			atomic.StoreInt32(&testComplete, 1)
-			return "done", nil
-		default:
-			panic("shouldn't be running anymore")
-		}
-	}
-	s.worker.RegisterWorkflowWithOptions(workflowFn, workflow.RegisterOptions{Name: wt})
-
-	_, err := s.FrontendClient().CreateSchedule(testcore.NewContext(), req)
-	s.NoError(err)
-	s.cleanup(sid)
-
-	s.Eventually(func() bool { return atomic.LoadInt32(&testComplete) == 1 }, 20*time.Second, 200*time.Millisecond)
-}
-
-func (s *ScheduleFunctionalSuite) TestExperimentalHsmLastCompletionAndError() {
-	sid := "sched-test-last"
-	wid := "sched-test-last-wf"
-	wt := "sched-test-last-wt"
-
-	s.OverrideDynamicConfig(schedulerhsm.UseExperimentalHsmScheduler, true)
-
-	schedule := &schedulepb.Schedule{
-		Spec: &schedulepb.ScheduleSpec{
-			Interval: []*schedulepb.IntervalSpec{
-				{Interval: durationpb.New(3 * time.Second)},
-			},
-		},
-		Action: &schedulepb.ScheduleAction{
-			Action: &schedulepb.ScheduleAction_StartWorkflow{
-				StartWorkflow: &workflowpb.NewWorkflowExecutionInfo{
-					WorkflowId:   wid,
-					WorkflowType: &commonpb.WorkflowType{Name: wt},
-					TaskQueue:    &taskqueuepb.TaskQueue{Name: s.taskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
-				},
-			},
-		},
-	}
-	req := &workflowservice.CreateScheduleRequest{
-		Namespace:  s.Namespace(),
-		ScheduleId: sid,
-		Schedule:   schedule,
-		Identity:   "test",
-		RequestId:  uuid.New(),
-	}
-
-	runs := make(map[string]struct{})
-	var testComplete int32
-
-	workflowFn := func(ctx workflow.Context) (string, error) {
-		var num int
-		_ = workflow.SideEffect(ctx, func(ctx workflow.Context) any {
-			runs[workflow.GetInfo(ctx).WorkflowExecution.ID] = struct{}{}
-			return len(runs)
-		}).Get(&num)
-
-		var lcr string
-		if workflow.HasLastCompletionResult(ctx) {
-			s.NoError(workflow.GetLastCompletionResult(ctx, &lcr))
-		}
-
-		lastErr := workflow.GetLastError(ctx)
-
-		switch num {
-		case 1:
-			s.Equal("", lcr)
-			s.NoError(lastErr)
-			return "this one succeeds", nil
-		case 2:
-			s.NoError(lastErr)
-			s.Equal("this one succeeds", lcr)
-			return "", errors.New("this one fails") //nolint:goerr113
+			return "", errors.New("this one fails")
 		case 3:
 			s.Equal("this one succeeds", lcr)
 			s.ErrorContains(lastErr, "this one fails")
@@ -847,7 +702,6 @@ func (s *ScheduleFunctionalSuite) TestRefresh() {
 	wid := "sched-test-refresh-wf"
 	wt := "sched-test-refresh-wt"
 
-	s.refreshWorkerServices()
 	schedule := &schedulepb.Schedule{
 		Spec: &schedulepb.ScheduleSpec{
 			Interval: []*schedulepb.IntervalSpec{
@@ -951,16 +805,8 @@ func (s *ScheduleFunctionalSuite) TestListBeforeRun() {
 	wid := "sched-test-list-before-run-wf"
 	wt := "sched-test-list-before-run-wt"
 
-	// clean up per-ns-worker. note that this will run after the OverrideDynamicConfig below is reverted.
-	s.T().Cleanup(func() {
-		s.refreshWorkerServices()
-		time.Sleep(2 * time.Second) //nolint:forbidigo
-	})
-
 	// disable per-ns worker so that the schedule workflow never runs
 	s.OverrideDynamicConfig(dynamicconfig.WorkerPerNamespaceWorkerCount, 0)
-	s.refreshWorkerServices()
-	time.Sleep(2 * time.Second) //nolint:forbidigo
 
 	schedule := &schedulepb.Schedule{
 		Spec: &schedulepb.ScheduleSpec{
@@ -1055,12 +901,105 @@ func (s *ScheduleFunctionalSuite) TestRateLimit() {
 	s.Less(atomic.LoadInt32(&runs), int32(10))
 }
 
+func (s *ScheduleFunctionalSuite) TestListSchedulesReturnsWorkflowStatus() {
+	// TODO - remove when ActionResultIncludesStatus becomes the active version
+	prevTweakables := scheduler.CurrentTweakablePolicies
+	scheduler.CurrentTweakablePolicies.Version = scheduler.ActionResultIncludesStatus
+	defer func() { scheduler.CurrentTweakablePolicies = prevTweakables }()
+
+	sid := "sched-test-list-running"
+	wid := "sched-test-list-running-wf"
+	wt := "sched-test-list-running-wt"
+
+	// Set up a schedule that immediately starts a single running workflow
+	schedule := &schedulepb.Schedule{
+		Spec: &schedulepb.ScheduleSpec{
+			Interval: []*schedulepb.IntervalSpec{
+				{Interval: durationpb.New(3 * time.Second)},
+			},
+		},
+		Action: &schedulepb.ScheduleAction{
+			Action: &schedulepb.ScheduleAction_StartWorkflow{
+				StartWorkflow: &workflowpb.NewWorkflowExecutionInfo{
+					WorkflowId:   wid,
+					WorkflowType: &commonpb.WorkflowType{Name: wt},
+					TaskQueue:    &taskqueuepb.TaskQueue{Name: s.taskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+				},
+			},
+		},
+	}
+	patch := &schedulepb.SchedulePatch{
+		TriggerImmediately: &schedulepb.TriggerImmediatelyRequest{},
+	}
+
+	// The workflow sits open until we've asserted it can be listed as running
+	resumeSignal := "resume"
+	workflowFn := func(ctx workflow.Context) error {
+		selector := workflow.NewSelector(ctx)
+		selector.AddReceive(workflow.GetSignalChannel(ctx, resumeSignal), func(c workflow.ReceiveChannel, more bool) {
+			// nothing to do
+		})
+		selector.Select(ctx)
+		return nil
+	}
+	s.worker.RegisterWorkflowWithOptions(workflowFn, workflow.RegisterOptions{Name: wt})
+
+	req := &workflowservice.CreateScheduleRequest{
+		Namespace:    s.Namespace(),
+		ScheduleId:   sid,
+		Schedule:     schedule,
+		InitialPatch: patch,
+		RequestId:    uuid.New(),
+	}
+	_, err := s.FrontendClient().CreateSchedule(testcore.NewContext(), req)
+	s.NoError(err)
+	s.cleanup(sid)
+
+	// validate RecentActions made it to visibility
+	listResp := s.getScheduleEntryFomVisibility(sid, func(listResp *schedulepb.ScheduleListEntry) bool {
+		return len(listResp.Info.RecentActions) >= 1
+	})
+	s.Equal(1, len(listResp.Info.RecentActions))
+
+	a1 := listResp.Info.RecentActions[0]
+	s.True(strings.HasPrefix(a1.StartWorkflowResult.WorkflowId, wid))
+	s.Equal(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, a1.StartWorkflowStatus)
+
+	// let the started workflow complete
+	_, err = s.FrontendClient().SignalWorkflowExecution(testcore.NewContext(), &workflowservice.SignalWorkflowExecutionRequest{
+		Namespace: s.Namespace(),
+		WorkflowExecution: &commonpb.WorkflowExecution{
+			WorkflowId: a1.StartWorkflowResult.WorkflowId,
+			RunId:      a1.StartWorkflowResult.RunId,
+		},
+		SignalName: resumeSignal,
+	})
+	s.NoError(err)
+
+	// now wait for second recent action to land in visbility
+	listResp = s.getScheduleEntryFomVisibility(sid, func(listResp *schedulepb.ScheduleListEntry) bool {
+		return len(listResp.Info.RecentActions) >= 2
+	})
+
+	a1 = listResp.Info.RecentActions[0]
+	a2 := listResp.Info.RecentActions[1]
+	s.Equal(enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, a1.StartWorkflowStatus)
+	s.Equal(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, a2.StartWorkflowStatus)
+
+	// Also verify that DescribeSchedule's output matches
+	descResp, err := s.FrontendClient().DescribeSchedule(testcore.NewContext(), &workflowservice.DescribeScheduleRequest{
+		Namespace:  s.Namespace(),
+		ScheduleId: sid,
+	})
+	s.NoError(err)
+	s.assertSameRecentActions(descResp, listResp)
+}
+
 func (s *ScheduleFunctionalSuite) TestNextTimeCache() {
 	sid := "sched-test-next-time-cache"
 	wid := "sched-test-next-time-cache-wf"
 	wt := "sched-test-next-time-cache-wt"
 
-	s.refreshWorkerServices()
 	schedule := &schedulepb.Schedule{
 		Spec: &schedulepb.ScheduleSpec{
 			Interval: []*schedulepb.IntervalSpec{
@@ -1179,12 +1118,6 @@ func (s *ScheduleFunctionalSuite) assertSameRecentActions(
 				actual.Info.RecentActions[i],
 			)
 		}
-	}
-}
-
-func (s *ScheduleFunctionalSuite) refreshWorkerServices() {
-	for _, w := range s.GetTestCluster().Host().WorkerServices() {
-		w.RefreshPerNSWorkerManager()
 	}
 }
 

@@ -33,12 +33,15 @@ import (
 	"github.com/pborman/uuid"
 	"github.com/stretchr/testify/require"
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/failure/v1"
 	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/api/workflowservice/v1"
 	enumsspb "go.temporal.io/server/api/enums/v1"
 	historyspb "go.temporal.io/server/api/history/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/payloads"
 	"go.temporal.io/server/common/primitives/timestamp"
 	"google.golang.org/protobuf/testing/protopack"
 )
@@ -349,7 +352,32 @@ func TestIsServiceClientTransientError_ResourceExhausted(t *testing.T) {
 			Message: "Mutable state cache is full",
 		},
 	))
+}
 
+func TestMultiOperationErrorRetries(t *testing.T) {
+	unavailableOpErr := serviceerror.NewMultiOperationExecution("err",
+		[]error{serviceerror.NewUnavailable("err")})
+	require.True(t, IsServiceHandlerRetryableError(unavailableOpErr))
+	require.True(t, IsServiceClientTransientError(unavailableOpErr))
+
+	invalidArgOpErr := serviceerror.NewMultiOperationExecution("err",
+		[]error{serviceerror.NewInvalidArgument("err")})
+	require.False(t, IsServiceHandlerRetryableError(invalidArgOpErr))
+	require.False(t, IsServiceClientTransientError(invalidArgOpErr))
+
+	nilOpErr := serviceerror.NewMultiOperationExecution("err",
+		[]error{nil})
+	require.False(t, IsServiceHandlerRetryableError(nilOpErr))
+	require.False(t, IsServiceClientTransientError(nilOpErr))
+
+	nilErrs := serviceerror.NewMultiOperationExecution("err", nil)
+	require.False(t, IsServiceHandlerRetryableError(nilErrs))
+	require.False(t, IsServiceClientTransientError(nilErrs))
+
+	nilAndUnavailableOpErr := serviceerror.NewMultiOperationExecution("err",
+		[]error{nil, serviceerror.NewUnavailable("err")})
+	require.True(t, IsServiceHandlerRetryableError(nilAndUnavailableOpErr))
+	require.True(t, IsServiceClientTransientError(nilAndUnavailableOpErr))
 }
 
 func TestDiscardUnknownProto(t *testing.T) {
@@ -548,7 +576,7 @@ func TestMergeProtoExcludingFields(t *testing.T) {
 			&info.ParentClock,
 			&info.CloseTransferTaskId,
 			&info.CloseVisibilityTaskId,
-			&info.CloseVisibilityTaskCompleted,
+			&info.RelocatableAttributesRemoved,
 			&info.WorkflowExecutionTimerTaskStatus,
 			&info.SubStateMachinesByType,
 			&info.StateMachineTimers,
@@ -561,4 +589,29 @@ func TestMergeProtoExcludingFields(t *testing.T) {
 
 	require.NotEqual(t, source.WorkflowTaskVersion, target.WorkflowTaskVersion)
 	require.Equal(t, source.WorkflowId, target.WorkflowId)
+}
+
+// Tests that CreateHistoryStartWorkflowRequest doesn't mutate the request
+// parameter when creating a history request with payloads set.
+func TestCreateHistoryStartWorkflowRequestPayloads(t *testing.T) {
+	failurePayload := &failure.Failure{}
+	resultPayload := payloads.EncodeString("result")
+	startRequest := &workflowservice.StartWorkflowExecutionRequest{
+		Namespace:            uuid.New(),
+		WorkflowId:           uuid.New(),
+		ContinuedFailure:     failurePayload,
+		LastCompletionResult: resultPayload,
+	}
+	startRequestClone := CloneProto(startRequest)
+
+	histRequest := CreateHistoryStartWorkflowRequest(startRequest.Namespace, startRequest, nil, nil, time.Now())
+
+	// ensure we aren't copying the payloads into the history request twice
+	require.Equal(t, failurePayload, histRequest.ContinuedFailure)
+	require.Equal(t, resultPayload, histRequest.LastCompletionResult)
+	require.Nil(t, histRequest.StartRequest.ContinuedFailure)
+	require.Nil(t, histRequest.StartRequest.LastCompletionResult)
+
+	// ensure the original request object is unmodified
+	require.Equal(t, startRequestClone, startRequest)
 }

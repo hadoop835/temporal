@@ -66,7 +66,6 @@ import (
 	"go.temporal.io/server/common/payloads"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/visibility/manager"
-	"go.temporal.io/server/common/persistence/visibility/store"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch"
 	"go.temporal.io/server/common/primitives"
 	"go.temporal.io/server/common/primitives/timestamp"
@@ -185,6 +184,7 @@ func (s *WorkflowHandlerSuite) getWorkflowHandler(config *Config) *WorkflowHandl
 		s.mockResource.GetMetadataManager(),
 		s.mockResource.GetHistoryClient(),
 		s.mockResource.GetMatchingClient(),
+		nil, // TODO (Shivam): test deploymentStoreClient here if desired
 		s.mockResource.GetArchiverProvider(),
 		s.mockResource.GetPayloadSerializer(),
 		s.mockResource.GetNamespaceRegistry(),
@@ -2374,34 +2374,8 @@ func (s *WorkflowHandlerSuite) TestStartBatchOperation_WorkflowExecutions_TooMan
 	config := s.newConfig()
 	wh := s.getWorkflowHandler(config)
 	s.mockNamespaceCache.EXPECT().GetNamespaceID(gomock.Any()).Return(namespaceID, nil).AnyTimes()
-	// Simulate std visibility, which does not support CountWorkflowExecutions
-	// TODO: remove this once every visibility implementation supports CountWorkflowExecutions
-	s.mockVisibilityMgr.EXPECT().CountWorkflowExecutions(gomock.Any(), gomock.Any()).Return(nil, store.OperationNotSupportedErr)
-	s.mockVisibilityMgr.EXPECT().ListWorkflowExecutions(
-		gomock.Any(),
-		gomock.Any(),
-	).DoAndReturn(
-		func(
-			_ context.Context,
-			request *manager.ListWorkflowExecutionsRequestV2,
-		) (*manager.ListWorkflowExecutionsResponse, error) {
-			s.Equal(testNamespace, request.Namespace)
-			s.True(strings.Contains(request.Query, searchattribute.WorkflowType))
-			s.Equal(int(config.MaxConcurrentBatchOperation(testNamespace.String())), request.PageSize)
-			s.Equal([]byte{}, request.NextPageToken)
-			return &manager.ListWorkflowExecutionsResponse{
-				Executions: []*workflowpb.WorkflowExecutionInfo{
-					{
-						Execution: &commonpb.WorkflowExecution{
-							WorkflowId: testWorkflowID,
-							RunId:      testRunID,
-						},
-					},
-				},
-				NextPageToken: nil,
-			}, nil
-		},
-	)
+	// StartBatchOperation API uses CountWorkflowExecutions to know how many existing in-flight batch operations.
+	s.mockVisibilityMgr.EXPECT().CountWorkflowExecutions(gomock.Any(), gomock.Any()).Return(&manager.CountWorkflowExecutionsResponse{Count: 1}, nil)
 
 	request := &workflowservice.StartBatchOperationRequest{
 		Namespace: testNamespace.String(),

@@ -29,6 +29,7 @@ import (
 
 	commandpb "go.temporal.io/api/command/v1"
 	commonpb "go.temporal.io/api/common/v1"
+	deploymentpb "go.temporal.io/api/deployment/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	historypb "go.temporal.io/api/history/v1"
@@ -237,6 +238,8 @@ func (b *HistoryBuilder) AddWorkflowTaskCompletedEvent(
 	workerVersionStamp *commonpb.WorkerVersionStamp,
 	sdkMetadata *sdkpb.WorkflowTaskCompletedMetadata,
 	meteringMetadata *commonpb.MeteringMetadata,
+	deployment *deploymentpb.Deployment,
+	behavior enumspb.VersioningBehavior,
 ) *historypb.HistoryEvent {
 	event := b.EventFactory.CreateWorkflowTaskCompletedEvent(
 		scheduledEventID,
@@ -246,6 +249,8 @@ func (b *HistoryBuilder) AddWorkflowTaskCompletedEvent(
 		workerVersionStamp,
 		sdkMetadata,
 		meteringMetadata,
+		deployment,
+		behavior,
 	)
 	event, _ = b.EventStore.add(event)
 	return event
@@ -402,6 +407,14 @@ func (b *HistoryBuilder) AddWorkflowExecutionTerminatedEvent(
 ) *historypb.HistoryEvent {
 	event := b.EventFactory.CreateWorkflowExecutionTerminatedEvent(reason, details, identity, links)
 
+	event, _ = b.EventStore.add(event)
+	return event
+}
+
+func (b *HistoryBuilder) AddWorkflowExecutionOptionsUpdatedEvent(
+	versioningOverride *workflowpb.VersioningOverride,
+) *historypb.HistoryEvent {
+	event := b.EventFactory.CreateWorkflowExecutionOptionsUpdatedEvent(versioningOverride)
 	event, _ = b.EventStore.add(event)
 	return event
 }
@@ -668,7 +681,6 @@ func (b *HistoryBuilder) AddWorkflowExecutionSignaledEvent(
 	input *commonpb.Payloads,
 	identity string,
 	header *commonpb.Header,
-	skipGenerateWorkflowTask bool,
 	externalWorkflowExecution *commonpb.WorkflowExecution,
 	links []*commonpb.Link,
 ) *historypb.HistoryEvent {
@@ -677,7 +689,6 @@ func (b *HistoryBuilder) AddWorkflowExecutionSignaledEvent(
 		input,
 		identity,
 		header,
-		skipGenerateWorkflowTask,
 		externalWorkflowExecution,
 		links,
 	)
